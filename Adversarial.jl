@@ -7,22 +7,30 @@ using Knet: SGD, train!, nll, zeroone, relu, dropout
 using AutoGrad
 import ProgressMeter
 using Statistics
-using ForwardDiff
 # https://arxiv.org/abs/1607.07892
+using ForwardDiff
 using IterTools
 
 function inf_dist(x, y)
-    # Doesn't work with methods requiring gradient descent
+    """
+    Computes the Infinity norm of (x - y)
+    Doesn't work as a term in a cost function (eg. L-BFGS)
+    """
     maximum([abs(v) for v in (x - y)])^2
 end
 
-function L2_dist(x, y)
+function L2_dist(x, y)    """
+    Computes the Euclidean norm of (x - y)
+    """
     ret = sum((x - y).^2)
     ret
 end
 
 function L0_dist(x, y)
-    # Doesn't work with methods requiring gradient descent
+    """
+    Computes the Infinity norm of (x - y)
+    Doesn't work as a term in a cost function (eg. L-BFGS)
+    """
     count = 0
     for (i, entry) in x
         if entry == y[i]
@@ -33,7 +41,11 @@ function L0_dist(x, y)
 end
 
 function DSSIM(x, y; bits=8, k₁=0.01, k₂=0.03)
-    # Note: when using DSSIM with adv_LBFGS, max_c needs to be much higher than for L2
+    """
+    Computes structural dissimilarity of two images
+    Better reflects human vision
+    Note: when using DSSIM with adv_LBFGS, max_c needs to be much higher than for L2
+    """
     μₓ = mean(x)
     μ_y = mean(y)
     σₓ2 = var(x)
@@ -48,10 +60,17 @@ end
 
 
 function predict_class(model, x)
+    """
+    Uses the model to predict what class x belongs to
+    """
     findmax(model(x, smax=true))[2]
 end
 
-function near_search(x0, model, target)
+function near_search(x0, model, target; o...)
+    """
+    Given an input of binary data, finds a 0 that can be
+    changed to a 1 to change the classification
+    """
     target == 1 ? off = 2 : off = 1
     best_x = nothing
     best_score = 0
@@ -70,6 +89,10 @@ function near_search(x0, model, target)
 end
 
 function saliency_map_alt(G, N, target)
+    """
+    A version of the Jacobian based saliency map used in JSMA
+    This is not the primary version, included for legacy reasons
+    """
     ret = zeros(N)
     for i in 1:N
         T = G[target, i]
@@ -83,6 +106,11 @@ function saliency_map_alt(G, N, target)
 end
 
 function saliency_map(G, Γ, target; inc=true)
+    """
+    The primary version of the Jacobian based saliency map used in JSMA
+    Identifies two pixels that can be changed that move the classifcation
+    towards the target
+    """
     M = 0
     p1, p2 = nothing, nothing
     for (p, q) in subsets(Γ, 2)
@@ -101,8 +129,16 @@ function saliency_map(G, Γ, target; inc=true)
     p1, p2
 end
     
-function JSMA(x0, model, target; γ=100, θ=1, smax=true)
-#     https://arxiv.org/abs/1511.07528
+function JSMA(x0, model, target; γ=100, θ=1, smax=true, o...)
+    """
+    An adversarial method that uses the Jacobian of the model with
+    respect to the input to permute the input towards a target
+    classification
+    γ is the percentage of pixels that can be altered.
+    θ is the amount by which to change any selected pixel (can be + or -)
+    smax is whether or not to include a softmax layer at the end of the model
+    https://arxiv.org/abs/1511.07528
+    """
     inc = θ > 0
     classes = length(target)
     G(x) = ForwardDiff.jacobian(model, x)
@@ -127,6 +163,15 @@ function JSMA(x0, model, target; γ=100, θ=1, smax=true)
 end
 
 function binary_search(f; depth=5, lower=0, upper=100, best=nothing)
+    """
+    An auxiliary method that performs a binary search between 0 and 100
+    to identify argument that minimizes f while satisfying a condition
+    f is a function that returns a value to be minimized and a condition to be satisfied
+    depth is how many iterations to run the algorithm
+    lower is the lower bound of the search
+    upper is the upper bound of the search
+    best is used in recursion. When calling this method don't touch it.
+    """
     curr = (lower + upper) / 2
     val1, val2 = f(curr)
     if best == nothing || (val2 && val1 < best[2])
@@ -143,7 +188,7 @@ function binary_search(f; depth=5, lower=0, upper=100, best=nothing)
     end
 end
 
-function adv_LBFGS(x0, model, target; max_c=1, dist=L2_dist)
+function adv_LBFGS(x0, model, target; max_c=1, dist=L2_dist, o...)
     """
     Perturbs x0 such that the model will classify it as the target
     Uses an L-BFGS similar to as described by Szegedy et al.
@@ -199,18 +244,20 @@ function adv_LBFGS(x0, model, target; max_c=1, dist=L2_dist)
     return x1
 end
 
-function adv_fast_LBFGS(x0, model, target; c=1, dist=L2_dist)
+function adv_fast_LBFGS(x0, model, target; c=1, dist=L2_dist, o...)
     """
     Perturbs x0 such that the model will classify it as the target
     Uses an L-BFGS similar to as described by Szegedy et al.
     
-    max_c is the maximum value of the c parameter which weights the
-    relative importance of the distance term. If the resulting example
-    is too far from the original, consider increasing max_c
+    c is the c parameter which weights the relative importance of the distance term.
+    If the resulting example is too far from the original, consider increasing c
     
     dist is the distance metric used. Commonly used distance metrics are
-    L2 norm, L_infinity norm, and DSSIM (all implemented above). Note that
-    different distance metrics require different values of max_c
+    L2 dist, and DSSIM (implemented above). Note that
+    different distance metrics require different values of c
+    
+    differs from normal LBFGS in that it does not search for an optimal c
+    and so runs much faster.
     """
     NumDimensions = length(x0)
     function error(xp; model=model, c=1, x0=x0, target=target)
@@ -239,7 +286,7 @@ end
 
 all_sign(x) = [(i >= 0 ? 1 : -1) for i in x]
 
-function adv_fast_gradient_sign(x0, model, target; ϵ=0.1)
+function adv_fast_gradient_sign(x0, model, target; ϵ=0.1, o...)
     """
     Implements the fast gradient sign method for finding adversarial examples
     Optimized for L_∞ norm, and is fast rather than finding close examples
@@ -249,7 +296,7 @@ function adv_fast_gradient_sign(x0, model, target; ϵ=0.1)
 end
 
 
-function adv_iterative_gradient_sign(x0, model, target; ϵ=10, dist=L2_dist, α=.01)
+function adv_iterative_gradient_sign(x0, model, target; ϵ=10, dist=L2_dist, α=.01, o...)
     """
     Similar to fast gradient sign, just with taking multiple steps of length α
     α = ϵ/steps
@@ -271,7 +318,9 @@ function adv_iterative_gradient_sign(x0, model, target; ϵ=10, dist=L2_dist, α=
 end
 
 function f6(x, model, target; κ=0)
-    # A term in the error function described in the Carlini et al. paper
+    """
+    A term in the error function described in the Carlini et al. paper
+    """
     Z = model(x)
     targetted_val = Z[target]
     untargetted_val = -Inf
@@ -286,6 +335,10 @@ end
 function adv_carlini_wagner(x0, model, target; dist=L2_dist, f=f6, c=.1)
     """
     The adversarial generative algorithm described in Carlini et al. 2017
+    
+    f is a term in the error function representing how close the input is to the target
+    c is a parameter weighting the relative importance of the distance between the
+    original image and the altered image
     """
     function error(wp; model=model, c=1, x0=x0, target=target)
         xp = max.(min.(wp, 1), 0)
@@ -314,7 +367,13 @@ function softmax(x::Array{Float32, 2}; dims=1, T=1)
     mapslices(f, x; dims=dims)
 end
 
-function untargetted_attack(model, attack, x, y; N=10)
+function untargetted_attack(model, attack, x, y)
+    """
+    Performs an untargetted attack on a model
+    x is the input to be attacked
+    y is the input's true classification
+    """
+    N = length(model.layers[end].b)
     for i in 1:N
         if i != y
             xp = attack(x, model, i)
@@ -327,6 +386,13 @@ function untargetted_attack(model, attack, x, y; N=10)
 end
 
 function trainresults(model,train; adv_model=nothing, adv_gen=adv_iterative_gradient_sign, o...)
+    """
+    trains a model given a training set
+    adv_model is another model trained on the same training set. If specified, the function will
+    replace the training set with adversarial examples targetting adv_model
+    adv_gen is the attack method used against adv_model
+    (adversarial training needs more testing)
+    """
     N = length(model.layers[end].b)
     hit = 0
     miss = 0
@@ -375,6 +441,12 @@ function trainresults(model,train; adv_model=nothing, adv_gen=adv_iterative_grad
     train!(model, dtrn; optimizer=SGD(lr=0.1), o...)
 end
 
+"""
+Cross entropy methods to be used as a loss function in training a neural net
+Allows for training to match a probability distribution over the classes rather
+than only matching a single class
+"""
+
 function cross_entropy(x,target::AbstractArray{<:Integer}; dims=1, average=true, N=10)
     y = zeros(Float32, N, length(target))
     for (i, ind) in enumerate(target)
@@ -402,6 +474,10 @@ end
 cross_entropy(f, x, y; dims=1, average=true, N=10, o...)=cross_entropy(f(x; o...), y; dims=dims, average=average, N=N)
 
 function trainresults_cross(model, train; o...)
+    """
+    Trains a model with the cross entropy loss function
+    Can be used for defensive distillation (still needs some work)
+    """
     N = length(model.layers[end].b)
     dtrn = []
     for (x, y) in train
@@ -416,6 +492,10 @@ end
 
 struct Linear; w; b; end
 (f::Linear)(x) = (f.w * x .+ f.b)
+
+"""
+Defining the model, may need to move this to another file
+"""
 
 Linear(inputsize::Int,outputsize::Int) = Linear(param(outputsize,inputsize),param0(outputsize))
 param(d...; init=xavier, atype=atype())=Param(atype(init(d...)))
@@ -462,40 +542,20 @@ function accuracy(model, dtst)
     correct / (correct + wrong)
 end
 
-function near_search(x0, model, target)
-    best_x = nothing
-    best_score = 0
-    for (i, x) in enumerate(x0)
-        if x != target
-            new_x = x0
-            new_x[i] = 1 - x
-            pred = model(new_x, smax=true)
-            if pred[1] > pred[2] && pred[1] > best_score
-                best_x = new_x
-                best_score = pred[1]
-            end
-        end
-    end
-    if best_x == nothing
-        return x0
-    else
-        return best_x
-    end
-end
-
-function predict_class(model, x0)
-    findmax(model(x0, smax=true))[2]
-end
-
 function targetted_test(model, examples; alg=adv_fast_gradient_sign)
+    """
+    Tests the success rate of a targetted attack alg against a model
+    on a dataset of examples
+    """
+    N = length(model.layers[end].b)
     successes = 0.0
     total = 0.0
     for example in examples
         x0 = example[1][:, 1]
         y0 = example[2][1]
-        target = rand(1:10)
+        target = rand(1:N)
         while target == y0
-            target = rand(1:10)
+            target = rand(1:N)
         end
         if findmax(model(x0, smax=true))[2] == y0
             x1 = alg(x0, model, target)
@@ -509,6 +569,11 @@ function targetted_test(model, examples; alg=adv_fast_gradient_sign)
 end
 
 function untargetted_test(model, examples; alg=adv_fast_gradient_sign)
+    """
+    Tests the success rate of a untargetted attack alg against a model
+    on a dataset of examples
+    """
+    N = length(model.layers[end].b)
     successes = 0.0
     total = 0.0
     for example in examples
@@ -517,7 +582,7 @@ function untargetted_test(model, examples; alg=adv_fast_gradient_sign)
         if findmax(model(x0, smax=true))[2] == y0
             target = 1
             found = false
-            while target < 11 && !found
+            while target <= N && !found
                 if target != y0
                     x1 = alg(x0, model, target)
                     if predict_class(model, x1) == target 
